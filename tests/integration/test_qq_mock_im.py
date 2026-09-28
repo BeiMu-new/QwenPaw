@@ -312,6 +312,13 @@ def test_qq_replayed_c2c_message_is_deduplicated(
         (same ``id``). The duplicate must be dropped before enqueue, so
         no new outbound send appears for that openid.
 
+    Guard coverage:
+      - This exercises the **per-id** guard. ``push_dispatch`` allocates
+        a fresh incrementing ``s`` on every push, so the replayed event
+        carries ``s > last_seq`` and passes straight through the seq
+        guard. The seq guard itself is covered by the unit test
+        ``test_handle_dispatch_replayed_seq_is_skipped``.
+
     Test flow:
       1. Push C2C_MESSAGE_CREATE with a fixed msg id (retry with a fresh
          id per attempt, as a channel reload can drop the first push).

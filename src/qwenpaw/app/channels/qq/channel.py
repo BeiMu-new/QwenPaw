@@ -1746,6 +1746,14 @@ class QQChannel(BaseChannel):
         # or below the highest sequence already processed is a replay.
         # This is O(1) memory and covers every dispatch event type
         # (messages and interactions), unlike a bounded per-id set.
+        #
+        # Division of labour with the per-id guard in
+        # ``_handle_msg_event``: a resume replays events *after* the
+        # submitted seq (i.e. with a higher ``s``), which is the shape
+        # seen in #7946, so the id guard is what catches that one. This
+        # seq guard covers the other shape: the same event delivered
+        # again with an unchanged ``s``. Keep both -- neither alone is
+        # sufficient.
         if (
             op == OP_DISPATCH
             and s is not None
@@ -1779,6 +1787,10 @@ class QQChannel(BaseChannel):
                     ),
                 )
             else:
+                # Fresh session: the gateway restarts `s` from 1, so the
+                # previous high-water mark is meaningless and would make
+                # the replay guard drop the upcoming READY.
+                state.last_seq = None
                 intents = INTENT_PUBLIC_GUILD_MESSAGES | INTENT_GUILD_MEMBERS
                 intents |= INTENT_INTERACTION
                 if state.identify_fail_count < 3:

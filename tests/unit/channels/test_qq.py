@@ -1798,6 +1798,63 @@ class TestHandleWSPayload:
         assert sent_data["op"] == OP_IDENTIFY
         hb.start.assert_called_once_with(30000)
 
+    def test_handle_hello_clears_stale_seq_when_identifying(
+        self,
+        qq_channel,
+        mock_websocket,
+    ):
+        """IDENTIFY means a fresh session, so the seq mark must reset.
+
+        Regression test for M1: if a ``READY`` arrives without a
+        ``session_id``, ``session_id`` goes falsy while ``last_seq`` keeps
+        the previous session's high value. The next ``HELLO`` then takes
+        the IDENTIFY branch -- a brand-new session whose ``s`` restarts at
+        1. Keeping the stale mark would make the replay guard silently
+        drop that session's ``READY``, leaving the channel unable to
+        recover.
+        """
+        from qwenpaw.app.channels.qq.channel import (
+            _WSState,
+            _HeartbeatController,
+            OP_IDENTIFY,
+        )
+
+        state = _WSState()
+        # Divergent state: no session_id, but a stale high-water mark.
+        state.session_id = None
+        state.last_seq = 300
+        hb = MagicMock(spec=_HeartbeatController)
+
+        hello = {"op": 10, "d": {"heartbeat_interval": 45000}}  # OP_HELLO
+        qq_channel._handle_ws_payload(
+            hello,
+            mock_websocket,
+            "token123",
+            state,
+            hb,
+        )
+
+        sent_data = json.loads(mock_websocket.send.call_args[0][0])
+        assert sent_data["op"] == OP_IDENTIFY
+        assert state.last_seq is None
+
+        # The new session's READY (``s`` restarts at 1) must survive.
+        ready = {
+            "op": 0,  # OP_DISPATCH
+            "t": "READY",
+            "d": {"session_id": "sess_new"},
+            "s": 1,
+        }
+        qq_channel._handle_ws_payload(
+            ready,
+            mock_websocket,
+            "token123",
+            state,
+            hb,
+        )
+        assert state.session_id == "sess_new"
+        assert state.last_seq == 1
+
     def test_handle_dispatch_ready(self, qq_channel, mock_websocket):
         """Should update state on READY dispatch."""
         from qwenpaw.app.channels.qq.channel import (
