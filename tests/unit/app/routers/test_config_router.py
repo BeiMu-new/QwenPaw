@@ -982,3 +982,34 @@ def test_put_sandbox_admin_enabling_saves(client):
     assert body["enabled"] is True
     assert body["effective"] is True
     assert calls == [fake_cfg]
+
+
+def test_put_sandbox_surfaces_clear_error_when_config_write_fails(client):
+    """A config write failure names the cause instead of a bare 500.
+
+    A locked / read-only / full-disk ``config.json`` used to bubble up as an
+    opaque ``Internal Server Error``; the user had no way to tell why enabling
+    the sandbox failed (QwenPaw #7672).
+    """
+    fake_cfg = MagicMock()
+    fake_cfg.security.sandbox_enabled = False
+
+    with (
+        patch(
+            "qwenpaw.app.routers.config.load_config",
+            return_value=fake_cfg,
+        ),
+        patch(
+            "qwenpaw.app.routers.config.mutate_config",
+            side_effect=OSError("The process cannot access the file"),
+        ),
+    ):
+        response = client.put(
+            "/api/config/security/sandbox",
+            json={"enabled": True},
+        )
+
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert "Failed to write the QwenPaw configuration file" in detail
+    assert "locked by another process" in detail

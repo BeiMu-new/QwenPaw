@@ -2,7 +2,7 @@
 
 import asyncio
 from datetime import datetime, timezone
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 from fastapi import (
     APIRouter,
@@ -60,6 +60,28 @@ from .schemas_config import (
 router = APIRouter(prefix="/config", tags=["config"])
 
 
+async def _mutate_config_or_error(mutator: Callable[[Any], None]) -> Any:
+    """Persist a root-config mutation, mapping write failures to a clear error.
+
+    Writing ``config.json`` can fail when the file is read-only, the disk is
+    full, or another process (a sync client, an antivirus scanner, ...) holds
+    it open. Left unhandled, that reaches the Console as a bare ``Internal
+    Server Error`` with nothing to act on, so translate it into a message that
+    names the cause.
+    """
+    try:
+        return await run_sync_io(mutate_config, mutator)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Failed to write the QwenPaw configuration file. It may be "
+                "read-only, on a full disk, or locked by another process "
+                f"({exc})."
+            ),
+        ) from exc
+
+
 @router.get(
     "/theme",
     response_model=dict,
@@ -85,7 +107,7 @@ async def put_theme(theme: ThemeConfig = Body(...)) -> ThemeConfig:
     def apply_theme(config: Any) -> None:
         config.theme = theme if theme.model_dump(exclude_none=True) else None
 
-    result = await run_sync_io(mutate_config, apply_theme)
+    result = await _mutate_config_or_error(apply_theme)
     return result.theme or ThemeConfig()
 
 
@@ -100,7 +122,7 @@ async def delete_theme() -> None:
     def clear_theme(config: Any) -> None:
         config.theme = None
 
-    await run_sync_io(mutate_config, clear_theme)
+    await _mutate_config_or_error(clear_theme)
 
 
 def _channel_config_class(name: str) -> Optional[type[BaseModel]]:
@@ -630,7 +652,7 @@ async def put_acp_node_runtime(
     def apply_node_path(config: Any) -> None:
         config.acp.node_path = node_path
 
-    config = await run_sync_io(mutate_config, apply_node_path)
+    config = await _mutate_config_or_error(apply_node_path)
     return await asyncio.to_thread(
         get_node_runtime_status,
         config.acp.node_path,
@@ -825,7 +847,7 @@ async def put_agents_llm_routing(
     def apply_routing(config: Any) -> None:
         config.agents.llm_routing = body
 
-    await run_sync_io(mutate_config, apply_routing)
+    await _mutate_config_or_error(apply_routing)
     return body
 
 
@@ -863,7 +885,7 @@ async def put_user_timezone(
     def apply_timezone(config: Any) -> None:
         config.user_timezone = resolved
 
-    await run_sync_io(mutate_config, apply_timezone)
+    await _mutate_config_or_error(apply_timezone)
     return {"timezone": resolved}
 
 
@@ -891,7 +913,7 @@ async def put_tool_guard(
     def apply_tool_guard(config: Any) -> None:
         config.security.tool_guard = body
 
-    await run_sync_io(mutate_config, apply_tool_guard)
+    await _mutate_config_or_error(apply_tool_guard)
 
     from ...security.tool_guard.engine import get_guard_engine
 
@@ -1055,7 +1077,7 @@ async def put_sandbox_setting(
     def apply_sandbox(config: Any) -> None:
         config.security.sandbox_enabled = body.enabled
 
-    await run_sync_io(mutate_config, apply_sandbox)
+    await _mutate_config_or_error(apply_sandbox)
     effective, reason = await _sandbox_effective_status(body.enabled)
     return SandboxStatusResponse(
         enabled=body.enabled,
@@ -1240,7 +1262,7 @@ async def put_file_guard(
                 body.allow_preview_outside_workspace
             )
 
-    config = await run_sync_io(mutate_config, apply_file_guard)
+    config = await _mutate_config_or_error(apply_file_guard)
     fg = config.security.file_guard
 
     from ...security.tool_guard.engine import get_guard_engine
@@ -1279,7 +1301,7 @@ async def put_skill_scanner(
     def apply_skill_scanner(config: Any) -> None:
         config.security.skill_scanner = body
 
-    await run_sync_io(mutate_config, apply_skill_scanner)
+    await _mutate_config_or_error(apply_skill_scanner)
     return body
 
 
@@ -1353,7 +1375,7 @@ async def add_to_whitelist(
             ),
         )
 
-    await run_sync_io(mutate_config, add_entry)
+    await _mutate_config_or_error(add_entry)
     return {"whitelisted": True, "skill_name": skill_name}
 
 
@@ -1378,7 +1400,7 @@ async def remove_from_whitelist(
                 detail=f"Skill '{skill_name}' not found in whitelist",
             )
 
-    await run_sync_io(mutate_config, remove_entry)
+    await _mutate_config_or_error(remove_entry)
     return {"removed": True, "skill_name": skill_name}
 
 
@@ -1473,5 +1495,5 @@ async def put_allow_no_auth_hosts(
     def apply_hosts(config: Any) -> None:
         config.security.allow_no_auth_hosts = normalized_hosts
 
-    await run_sync_io(mutate_config, apply_hosts)
+    await _mutate_config_or_error(apply_hosts)
     return AllowNoAuthHostsResponse(hosts=normalized_hosts)
