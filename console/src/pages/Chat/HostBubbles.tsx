@@ -70,6 +70,7 @@ import {
   subscribeChatDisplayPreference,
   type AssistantMessageDisplayPreference,
 } from "../../utils/chatDisplayPreference";
+import { normalizeCjkEmphasis } from "../../utils/markdownCjk";
 
 function sortByOrder<T extends { item: { order?: number } }>(arr: T[]): T[] {
   return arr
@@ -89,10 +90,18 @@ function DeferredMarkdown({
   // obsolete intermediate parses while keeping input and scrolling responsive.
   const deferredContent = useDeferredValue(content);
 
+  // Repair CJK emphasis boundaries (e.g. ``**中文。**后``) so a closing ``**``
+  // that sits after CJK punctuation and before CJK text still renders instead
+  // of leaking the raw markers.
+  const displayContent = useMemo(
+    () => normalizeCjkEmphasis(deferredContent),
+    [deferredContent],
+  );
+
   return (
     <Markdown
       components={renderableCodeComponents}
-      content={deferredContent}
+      content={displayContent}
       cursor={cursor}
     />
   );
