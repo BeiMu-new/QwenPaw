@@ -39,6 +39,19 @@ def _is_iana(name: Optional[str]) -> bool:
     return bool(name and "/" in name)
 
 
+def _is_timezone_name(name: Optional[str]) -> bool:
+    """Return True if *name* is a resolvable IANA/alias timezone name.
+
+    Unlike :func:`_is_iana` this also accepts slashless names such as
+    ``"UTC"``, which the environment probe must not skip: a process started
+    with ``TZ=UTC`` runs on UTC, while the other probes would still report
+    the *host* zone and silently disagree with ``datetime.now()``.
+    """
+    if not name:
+        return False
+    return normalize_tz(name) is not None
+
+
 def normalize_tz(name: str) -> Optional[str]:
     """Validate and normalize a timezone name.
 
@@ -70,7 +83,11 @@ def detect_system_timezone() -> str:
     """Return the IANA timezone name of the host.
 
     Falls back to ``"UTC"`` when detection fails.  This function
-    must *never* raise — any unexpected error is swallowed.
+    must *never* raise — any unexpected error is swallowed.  Note that
+    ``"UTC"`` is also a legitimate result, so callers that need to tell a
+    genuinely-UTC host from a failed lookup should compare the returned
+    zone against the process's actual offset (see
+    ``qwenpaw.app.chats.utils._process_local_tz``).
     """
     try:
         return _detect_system_timezone_inner()
@@ -126,9 +143,13 @@ def _probe_python() -> Optional[str]:
 def _probe_env() -> Optional[str]:
     """Check the ``$TZ`` environment variable."""
     tz = os.environ.get("TZ", "")
-    return tz if _is_iana(tz) else None
+    return tz if _is_timezone_name(tz) else None
 
 
+# Windows registry zone names mapped to IANA ids. Covers the common zones;
+# a name outside this map makes ``_probe_windows_registry`` return ``None``,
+# and the caller then falls back to the process offset rather than stamping
+# ``+00:00``. Extend as needed.
 _WIN_TO_IANA = {
     "China Standard Time": "Asia/Shanghai",
     "Taipei Standard Time": "Asia/Taipei",
