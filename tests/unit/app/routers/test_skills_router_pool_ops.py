@@ -27,6 +27,7 @@ import asyncio
 import json
 import tempfile
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -2625,3 +2626,73 @@ def test_pool_download_runs_the_copy_off_the_event_loop(monkeypatch):
     assert asyncio.run(call_route()) == {"downloaded": []}
     assert worker_threads
     assert worker_threads[0] != loop_threads[0]
+
+
+def test_pool_download_serializes_overlapping_requests(monkeypatch):
+    """Two overlapping downloads into one workspace must not interleave.
+
+    Offloading the copy off the event loop lets two requests run at once.
+    Preflight + install is a check-then-write, so without a lock the second
+    request could pass preflight against the pre-install state and then
+    roll back the first request's finished install. The lock must wrap the
+    whole thing, preflight included.
+    """
+    monkeypatch.setattr(
+        skills_module,
+        "_pool_download_lock_keys",
+        lambda body: ["ws-1"],
+    )
+    events: list[str] = []
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    order: list[str] = []
+
+    def fake_locked(body):
+        tag = body.skill_name
+        events.append(f"{tag}:enter")
+        order.append(tag)
+        if tag == "first":
+            first_entered.set()
+            release_first.wait(5)
+        events.append(f"{tag}:exit")
+        return {"downloaded": []}
+
+    monkeypatch.setattr(
+        skills_module,
+        "_download_pool_skill_locked",
+        fake_locked,
+    )
+    body = lambda name: skills_module.DownloadFromPoolRequest(  # noqa: E731
+        skill_name=name,
+        targets=[skills_module.PoolDownloadTarget(workspace_id="ws-1")],
+    )
+    results: dict[str, Any] = {}
+
+    def run(name):
+        results[name] = skills_module._download_pool_skill(body(name))
+
+    first = threading.Thread(target=run, args=("first",))
+    second = threading.Thread(target=run, args=("second",))
+    first.start()
+    assert first_entered.wait(5)
+    second.start()
+    # Give the second thread a chance to (wrongly) slip past the lock.
+    time.sleep(0.2)
+    assert events == [
+        "first:enter",
+    ], f"second entered while first held it: {events}"
+    release_first.set()
+    first.join(5)
+    second.join(5)
+
+    assert order == ["first", "second"]
+    assert events == [
+        "first:enter",
+        "first:exit",
+        "second:enter",
+        "second:exit",
+    ]
+    assert results == {
+        "first": {"downloaded": []},
+        "second": {"downloaded": []},
+    }

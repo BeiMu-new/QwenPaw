@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
+import time
 import zipfile
 
 import pytest
@@ -732,7 +734,7 @@ def test_cleanup_orphan_skill_stages_removes_only_stage_dirs(
 
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
 
-    assert cleanup_orphan_skill_stages() == 1
+    assert cleanup_orphan_skill_stages(max_age_seconds=0) == 1
     assert not orphan.exists()
     assert unrelated_dir.is_dir()
     assert unrelated_file.is_file()
@@ -746,3 +748,39 @@ def test_cleanup_orphan_skill_stages_is_a_noop_without_stages(
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
 
     assert cleanup_orphan_skill_stages() == 0
+
+
+def test_cleanup_orphan_skill_stages_spares_recently_written_dir(
+    monkeypatch,
+    tmp_path,
+):
+    """A dir written inside the grace period is left for another instance."""
+    recent = tmp_path / "qwenpaw_skill_stage_live-instance_def456"
+    (recent / "demo").mkdir(parents=True)
+    (recent / "demo" / "SKILL.md").write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+
+    assert cleanup_orphan_skill_stages() == 0
+    assert recent.is_dir()
+
+
+def test_cleanup_orphan_skill_stages_checks_newest_entry_mtime(
+    monkeypatch,
+    tmp_path,
+):
+    """Writing into a subdir must count, not just the top dir's own mtime."""
+    stale = tmp_path / "qwenpaw_skill_stage_old_e7890a"
+    (stale / "demo").mkdir(parents=True)
+    (stale / "demo" / "SKILL.md").write_text("x", encoding="utf-8")
+    old_stamp = time.time() - 3 * 24 * 60 * 60
+    os.utime(stale, (old_stamp, old_stamp))
+    # A writer is active two levels deep: that file's mtime is fresh.
+    inner = stale / "demo" / "assets"
+    inner.mkdir()
+    (inner / "part.txt").write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+
+    assert cleanup_orphan_skill_stages() == 0
+    assert stale.is_dir()

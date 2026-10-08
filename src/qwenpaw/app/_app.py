@@ -262,10 +262,6 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
     migrate_legacy_skills_to_skill_pool()
     ensure_qa_agent_exists()
 
-    from ..agents.skill_system import cleanup_orphan_skill_stages
-
-    await asyncio.to_thread(cleanup_orphan_skill_stages)
-
     from ..config.utils import get_agent_dirs
     from ..portability.transaction_journal import recover_import_transactions
 
@@ -661,6 +657,28 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
             except Exception:
                 logger.warning(
                     "Skill Pool automation skipped on startup",
+                    exc_info=True,
+                )
+
+            # ---- Orphan skill staging dirs ----
+            # Best-effort housekeeping: a leaked stage dir is harmless, so
+            # cleanup must never gate startup on temp-dir I/O.
+            try:
+                from ..agents.skill_system import (
+                    cleanup_orphan_skill_stages,
+                )
+
+                removed = await asyncio.to_thread(
+                    cleanup_orphan_skill_stages,
+                )
+                if removed:
+                    logger.info(
+                        "Removed %d orphan skill staging dir(s)",
+                        removed,
+                    )
+            except Exception:
+                logger.warning(
+                    "Orphan skill staging cleanup skipped",
                     exc_info=True,
                 )
 

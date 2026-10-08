@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import ExitStack
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -466,6 +467,41 @@ _ALLOWED_ZIP_TYPES = {
     "application/x-zip-compressed",
     "application/octet-stream",
 }
+
+# ``POST /pool/download`` runs its blocking body in a worker thread. Before
+# that change a copy held the event loop for its whole run, so two downloads
+# could never overlap; offloading the copy opens that door. Preflight +
+# install is a check-then-write over a workspace, so two overlapping requests
+# could both pass preflight and then one request's rollback would restore a
+# snapshot taken before the other had installed. Serialize the whole
+# check-and-install per workspace, so the second request re-preflights against
+# whatever the first one left behind.
+_pool_download_locks_guard = threading.Lock()
+_pool_download_locks: dict[str, threading.Lock] = {}
+
+
+def _pool_download_lock(workspace_id: str) -> threading.Lock:
+    with _pool_download_locks_guard:
+        lock = _pool_download_locks.get(workspace_id)
+        if lock is None:
+            lock = threading.Lock()
+            _pool_download_locks[workspace_id] = lock
+        return lock
+
+
+def _pool_download_lock_keys(body: DownloadFromPoolRequest) -> list[str]:
+    """Workspace ids a download request will write to, in a stable order.
+
+    Sorted so two requests that touch the same set of workspaces always take
+    their locks in the same order and cannot deadlock. Computed from the
+    request rather than from the resolved plan: preflight itself must already
+    be inside the lock to close the race, so it cannot be used to pick keys.
+    """
+    if body.all_workspaces:
+        keys = {str(workspace["agent_id"]) for workspace in list_workspaces()}
+    else:
+        keys = {target.workspace_id for target in body.targets}
+    return sorted(keys)
 
 
 def _workspace_dir_for_agent(agent_id: str) -> Path:
@@ -1434,12 +1470,32 @@ async def download_pool_skill_to_workspaces(
     A large skill means thousands of file operations, so the blocking work runs
     in a worker thread: doing it inline would freeze the event loop and every
     other API for the whole copy.
+
+    Concurrent downloads into the same workspace are serialized end to end
+    (preflight included), so a second request cannot slip in behind a first
+    request's successful install and then undo it on rollback.
     """
     return await asyncio.to_thread(_download_pool_skill, body)
 
 
 def _download_pool_skill(body: DownloadFromPoolRequest) -> dict[str, Any]:
-    """Blocking body of ``POST /pool/download``; see the route docstring."""
+    """Blocking body of ``POST /pool/download``; see the route docstring.
+
+    The whole check-then-install runs under a per-workspace lock. Preflight
+    has to be inside it: two overlapping requests would otherwise both pass
+    preflight against the same untouched workspace and then fight over it.
+    """
+    with ExitStack() as stack:
+        for key in _pool_download_lock_keys(body):
+            stack.enter_context(_pool_download_lock(key))
+        result = _download_pool_skill_locked(body)
+    return result
+
+
+def _download_pool_skill_locked(
+    body: DownloadFromPoolRequest,
+) -> dict[str, Any]:
+    """Install a pool skill; caller holds the per-workspace lock(s)."""
     targets, hub_service = _resolve_and_preflight(body)
     if body.preview_only:
         return {"downloaded": []}
