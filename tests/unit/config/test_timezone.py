@@ -7,6 +7,7 @@ from qwenpaw.config.timezone import (
     _WIN_TO_IANA,
     _probe_env,
     detect_system_timezone,
+    normalize_tz,
 )
 
 
@@ -43,6 +44,19 @@ def test_win_to_iana_values_are_resolvable():
         )
         == []
     )
+
+
+def test_win_to_iana_values_normalise_to_a_fixpoint():
+    """The probe hands the raw CLDR value to ``normalize_tz``, so a value
+    that is itself a deprecated link (``America/Godthab``) would otherwise
+    reach ``Config.user_timezone`` uncanonicalised."""
+    unresolved = {}
+    for value in sorted(set(_WIN_TO_IANA.values())):
+        once = normalize_tz(value)
+        twice = normalize_tz(once) if once is not None else None
+        if once is None or twice != once:
+            unresolved[value] = (once, twice)
+    assert not unresolved
 
 
 def test_win_to_iana_covers_the_windows_catalogue():

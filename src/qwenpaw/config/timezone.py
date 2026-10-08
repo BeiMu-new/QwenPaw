@@ -17,6 +17,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 logger = logging.getLogger(__name__)
 
 _NON_STANDARD_ALIASES: dict[str, str] = {
+    "America/Buenos_Aires": "America/Argentina/Buenos_Aires",
+    "America/Godthab": "America/Nuuk",
+    "America/Indianapolis": "America/Indiana/Indianapolis",
     "Asia/Beijing": "Asia/Shanghai",
     "Asia/Calcutta": "Asia/Kolkata",
     "Asia/Saigon": "Asia/Ho_Chi_Minh",
@@ -158,7 +161,8 @@ def _probe_env() -> Optional[str]:
 # on Windows 10/11 (141 names).  The two names CLDR has dropped
 # (``Kamchatka`` / ``Mid-Atlantic Standard Time``) are mapped by hand.
 # Values keep CLDR's spelling, including backward-compatible links
-# (``Asia/Calcutta``); ``normalize_tz`` canonicalises them on the way out.
+# (``America/Buenos_Aires``, ``America/Godthab``); ``normalize_tz``
+# canonicalises those on the way out.
 # A name outside this map makes ``_probe_windows_registry`` return ``None``;
 # the caller then keeps the process offset rather than stamping ``+00:00``.
 _WIN_TO_IANA = {
