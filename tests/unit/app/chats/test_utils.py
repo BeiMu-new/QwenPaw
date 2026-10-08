@@ -499,17 +499,18 @@ def test_process_local_tz_rejects_zone_that_contradicts_the_clock(monkeypatch):
     """
     import qwenpaw.app.chats.utils as chats_utils
 
-    real = datetime.now().astimezone().tzinfo
-    if real is None or real.utcoffset(datetime.now()) == timedelta(0):
-        pytest.skip("host is genuinely UTC; the contradiction cannot be built")
+    # Windows host whose registry name is unmapped: the process clock is
+    # +08:00 while detect_system_timezone() silently says "UTC".
+    _simulate_host_in(monkeypatch, chats_utils, "Asia/Shanghai")
     monkeypatch.setattr(chats_utils, "detect_system_timezone", lambda: "UTC")
-    chats_utils._process_local_tz.cache_clear()
     try:
         tz = chats_utils._process_local_tz()
+        # The bogus "UTC" zone does not explain the process offset, so the
+        # previous fixed offset is kept instead of stamping +00:00.
+        assert tz.utcoffset(datetime(2026, 1, 15, 9)) == timedelta(hours=8)
+        assert tz.utcoffset(datetime(2026, 7, 15, 9)) == timedelta(hours=8)
     finally:
         chats_utils._process_local_tz.cache_clear()
-    # The bogus "UTC" zone does not explain the process offset -> rejected.
-    assert tz.utcoffset(datetime.now()) == real.utcoffset(datetime.now())
 
 
 def test_process_local_tz_accepts_zone_that_matches_the_clock(monkeypatch):
@@ -546,24 +547,17 @@ def test_normalize_msg_timestamp_keeps_offset_when_zone_contradicts_clock(
     wrongly returning ``"UTC"``, 09:00 local stays 09:00 +08:00."""
     import qwenpaw.app.chats.utils as chats_utils
 
-    real = datetime.now().astimezone().tzinfo
-    if real is None or real.utcoffset(datetime.now()) == timedelta(0):
-        pytest.skip("host is genuinely UTC; the contradiction cannot be built")
+    # Same unmapped-Windows-name scenario, driven through the real
+    # normalization path.
+    _simulate_host_in(monkeypatch, chats_utils, "Asia/Shanghai")
     monkeypatch.setattr(chats_utils, "detect_system_timezone", lambda: "UTC")
-    chats_utils._process_local_tz.cache_clear()
     try:
-        expected = (
-            datetime(2026, 1, 15, 9)
-            .replace(tzinfo=real)
-            .astimezone(ZoneInfo("Asia/Shanghai"))
-            .isoformat()
-        )
         assert (
             _normalize_msg_timestamp(
                 "2026-01-15T09:00:00",
                 ZoneInfo("Asia/Shanghai"),
             )
-            == expected
+            == "2026-01-15T09:00:00+08:00"
         )
     finally:
         chats_utils._process_local_tz.cache_clear()

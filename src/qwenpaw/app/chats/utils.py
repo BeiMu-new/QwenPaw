@@ -59,10 +59,9 @@ def _zone_explains_offset(zone: ZoneInfo, fixed: tzinfo) -> bool:
 
     ``detect_system_timezone()`` cannot report failure — it falls back to
     ``"UTC"`` — so a resolved zone is only trustworthy when it agrees with
-    the offset the process is actually running at.  A Windows host whose
-    registry name is missing from ``_WIN_TO_IANA``, or a container whose
-    ``TZ`` has no slash (skipped by ``_probe_env``), would otherwise be
-    stamped ``+00:00`` — off by the whole UTC offset, not by the DST delta.
+    the offset the process is actually running at.  Otherwise a host whose
+    zone cannot be resolved would be stamped ``+00:00`` — off by the whole
+    UTC offset, not by the DST delta.
     """
     now = datetime.now()
     return (
@@ -82,8 +81,8 @@ def _process_local_tz():
     *current* offset (a fixed ``datetime.timezone``), so attaching it to a
     naive timestamp recorded in the opposite DST half-year silently shifts
     the value by the DST delta.  The resolved zone is kept only when it
-    explains the process's current offset; otherwise the previous fixed
-    offset is used (no worse than before).
+    explains the process's current offset; otherwise it falls back to the
+    previous behaviour and uses the fixed offset.
     """
     fixed = _fixed_local_tz()
     zone = _resolve_process_zone()
