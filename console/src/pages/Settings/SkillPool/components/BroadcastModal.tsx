@@ -90,7 +90,6 @@ export function BroadcastModal({
       className={transferStyles.modal}
       open={open}
       surfaceId={surfaceId}
-      confirmLoading={submitting}
       closable={!submitting}
       maskClosable={!submitting}
       keyboard={!submitting}
@@ -106,7 +105,12 @@ export function BroadcastModal({
           setSubmitting(false);
         }
       }}
+      // The busy state lives on the OK button rather than in `confirmLoading`,
+      // because antd 5.29 short-circuits `onCancel` whenever `confirmLoading`
+      // is set — which made "Cancel import" look enabled during a download
+      // while doing nothing.
       okButtonProps={{
+        loading: submitting,
         disabled:
           selectedSkillNames.length === 0 || selectedWorkspaceIds.length === 0,
       }}
