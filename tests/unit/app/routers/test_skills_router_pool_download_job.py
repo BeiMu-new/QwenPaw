@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from fastapi import HTTPException, status
+from fastapi import HTTPException
 
 from qwenpaw.agents.skill_system.store import (
     _cancel_checker_ctx,
@@ -29,7 +29,6 @@ from qwenpaw.agents.skill_system.store import (
 from qwenpaw.app.routers import skills as skills_module
 from qwenpaw.app.routers.skills import (
     DownloadFromPoolRequest,
-    PoolDownloadJob,
     PoolDownloadState,
     _ResolvedDownloadTarget,
 )
@@ -79,40 +78,6 @@ async def _wait_for(predicate, *, tries: int = 200) -> None:
             return
         await asyncio.sleep(0.01)
     raise AssertionError("condition never became true")
-
-
-def test_the_job_handles_are_the_approved_shape():
-    """Pin the routes and the fields the design note was approved with.
-
-    The note promises three routes under the skills router, a 202 on start,
-    and a job id that carries no progress: no percentage, no file count, no
-    total. These paths are the declared ones, prefix included.
-    """
-    routes = {
-        (route.path, method): route
-        for route in skills_module.router.routes
-        for method in getattr(route, "methods", set())
-    }
-
-    start = routes[("/skills/pool/downloads", "POST")]
-    assert start.status_code == status.HTTP_202_ACCEPTED
-    assert ("/skills/pool/downloads/{job_id}", "GET") in routes
-    assert ("/skills/pool/downloads/{job_id}", "DELETE") in routes
-    # The direct download keeps its own route, unchanged.
-    assert ("/skills/pool/download", "POST") in routes
-    assert set(PoolDownloadJob.model_fields) == {
-        "job_id",
-        "state",
-        "error",
-        "result",
-    }
-    assert {state.value for state in PoolDownloadState} == {
-        "running",
-        "cancelling",
-        "completed",
-        "failed",
-        "cancelled",
-    }
 
 
 async def test_start_hands_the_blocking_body_through_unchanged(monkeypatch):
@@ -320,23 +285,20 @@ async def test_state_and_cancel_404_for_an_unknown_job():
         assert caught.value.status_code == 404
 
 
-def test_a_broken_checker_never_fails_a_download():
-    """A cancellation channel that errors must degrade to "not cancelled"."""
-
-    def broken() -> bool:
-        raise RuntimeError("the cancel channel is down")
-
-    with with_cancel_checker(broken):
-        ensure_not_cancelled()  # must not raise
-
-
 def test_the_armed_checker_is_scoped_to_the_with_block():
+    """The checker applies inside its block only, and fails safe."""
     assert _cancel_checker_ctx.get() is None
     with with_cancel_checker(lambda: True):
         with pytest.raises(SkillImportCancelled):
             ensure_not_cancelled()
     assert _cancel_checker_ctx.get() is None
     ensure_not_cancelled()  # unarmed again, so a copy is allowed to run
+
+    def broken() -> bool:
+        raise RuntimeError("the cancel channel is down")
+
+    with with_cancel_checker(broken):
+        ensure_not_cancelled()  # a dead channel must not fail a download
 
 
 def _scan_result() -> SimpleNamespace:

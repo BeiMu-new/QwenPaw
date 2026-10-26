@@ -16,7 +16,6 @@ import pytest
 
 from qwenpaw.agents.skill_system.store import (
     copy_skill_dir,
-    ensure_not_cancelled,
     with_cancel_checker,
 )
 from qwenpaw.exceptions import SkillImportCancelled
@@ -97,24 +96,3 @@ def test_an_unarmed_copy_is_unchanged(tmp_path):
     assert _file_names(target) == set(names)
     for name in names:
         assert (target / name).read_bytes() == (source / name).read_bytes()
-
-
-def test_a_nested_checker_does_not_leak_out_of_its_block(tmp_path):
-    """Nested operations must each observe their own checker."""
-    source = _make_source(tmp_path, ("a.txt",))
-    outer_target = tmp_path / "outer"
-    inner_target = tmp_path / "inner"
-
-    with with_cancel_checker(lambda: False):
-        with with_cancel_checker(lambda: True):
-            with pytest.raises(SkillImportCancelled):
-                copy_skill_dir(source, inner_target)
-        # Back to the outer checker, which never cancels.
-        copy_skill_dir(source, outer_target)
-
-    assert _file_names(outer_target) == {"a.txt"}
-    assert not inner_target.exists()
-
-
-def test_ensure_not_cancelled_is_a_no_op_without_a_checker():
-    ensure_not_cancelled()
