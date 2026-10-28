@@ -1,7 +1,13 @@
 # -*- coding: utf-8 -*-
 """Tests for embedded ReMe configuration mapping."""
 
+import tomllib
+from pathlib import Path
+
 from qwenpaw.agents.memory.reme_config import get_reme_app_config
+from qwenpaw.agents.memory.reme_light_memory_manager import (
+    _REQUIRED_REME_VERSION,
+)
 from qwenpaw.config.config import (
     AgentProfileConfig,
     AgentsRunningConfig,
@@ -351,3 +357,35 @@ def test_ollama_embedding_without_host_still_enables_with_model() -> None:
         == "default"
     )
     assert not cfg["components"]["as_embedding"]["default"]["credential"]
+
+
+def test_reme_pin_matches_packaged_requirement() -> None:
+    """The runtime contract and the packaged pin must never drift apart.
+
+    ``_load_validated_reme_app`` rejects any version that differs from
+    ``_REQUIRED_REME_VERSION``, so a stale pin in ``pyproject.toml`` turns a
+    successful install into a startup failure. Keep both in one edit.
+    """
+    project_root = Path(__file__).resolve().parents[4]
+    pyproject = tomllib.loads(
+        (project_root / "pyproject.toml").read_text(encoding="utf-8"),
+    )
+
+    def _pin_name(item: str) -> str:
+        """``reme-ai[extra]==1.2.3; marker`` -> ``reme-ai``."""
+        return item.split(";")[0].split("==")[0].split("[")[0].strip()
+
+    pins = [
+        item
+        for item in pyproject["project"]["dependencies"]
+        if _pin_name(item) == "reme-ai"
+    ]
+
+    assert len(pins) == 1, f"expected one reme-ai pin, found {pins}"
+    assert "==" in pins[0], f"reme-ai must be pinned, found {pins[0]}"
+    assert pins[0].split(";")[0].split("==", 1)[1].strip() == (
+        _REQUIRED_REME_VERSION
+    ), (
+        f"pyproject pins {pins[0]}, but the runtime requires "
+        f"reme-ai=={_REQUIRED_REME_VERSION}"
+    )
