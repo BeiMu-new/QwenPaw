@@ -19,11 +19,12 @@ from typing import Any
 from agentscope.message import Base64Source, DataBlock
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from ...providers.capping_formatter import MAX_INLINE_MEDIA_BYTES
+from ...providers.capping_formatter import (
+    MAX_IMAGE_SIDE,
+    MAX_INLINE_MEDIA_BYTES,
+)
 from ...utils.io_utils import run_sync_io
 
-# Longest side accepted by downstream vision endpoints.
-MAX_IMAGE_SIDE = 8192
 _RESCALABLE_MEDIA_TYPES = frozenset(
     {"image/jpeg", "image/png", "image/webp"},
 )
@@ -35,7 +36,7 @@ def _encode(
     image: Image.Image,
     media_type: str,
     has_alpha: bool,
-    quality: int,
+    quality: int | None,
 ) -> bytes:
     """Encode *image* in *media_type*, keeping transparency when present."""
     output = BytesIO()
@@ -67,18 +68,30 @@ def downscale_image_bytes(
     media_type: str,
     *,
     max_bytes: int = MAX_INLINE_MEDIA_BYTES,
+    max_side: int = MAX_IMAGE_SIDE,
 ) -> tuple[bytes, str]:
     """Return request-sized bytes for one image.
 
-    Images inside the limits, animated images and anything the encoder cannot
-    handle are returned unchanged: this can only improve the odds of a
-    successful request, never make the payload worse.
+    An image is re-encoded when *either* limit is exceeded — the longest
+    side or the byte size — because providers reject on both independently
+    and a small-pixel, high-byte PNG never trips the side check alone.
+
+    Images inside both limits, animated images, and anything the encoder
+    cannot handle are returned unchanged: this can only improve the odds of
+    a successful request, never make the payload worse.
     """
     try:
         with Image.open(BytesIO(image_bytes)) as opened:
             if getattr(opened, "n_frames", 1) > 1:
                 return image_bytes, media_type
-            if max(opened.size) <= MAX_IMAGE_SIDE:
+            # Both limits decide, not just the long side: a 2000x2000 PNG is
+            # well inside the pixel limit and still several megabytes, and
+            # the provider rejects it on bytes. Judging the side alone left
+            # such images untouched and the request over its inline budget.
+            # ``max_bytes <= 0`` means "no byte limit", matching the
+            # formatter field where 0 disables the cap.
+            within_bytes = max_bytes <= 0 or len(image_bytes) <= max_bytes
+            if max(opened.size) <= max_side and within_bytes:
                 return image_bytes, media_type
             opened.load()
             oriented = ImageOps.exif_transpose(opened) or opened
@@ -90,15 +103,25 @@ def downscale_image_bytes(
                 if media_type in _RESCALABLE_MEDIA_TYPES
                 else "image/png"
             )
+            # A no-op when the side is already inside the limit, which is
+            # the byte-only case this branch now also serves.
             oriented.thumbnail(
-                (MAX_IMAGE_SIDE, MAX_IMAGE_SIDE),
+                (max_side, max_side),
                 Image.Resampling.LANCZOS,
             )
             candidate = oriented
+            # PNG has no quality knob, so every quality step would emit the
+            # same bytes and pay another full deflate for it. Only reducing
+            # the side shrinks a PNG.
+            quality_steps: tuple[int | None, ...] = (
+                (None,) if target == "image/png" else _QUALITY_STEPS
+            )
             for _ in range(_MAX_REDUCTIONS):
-                for quality in _QUALITY_STEPS:
+                for quality in quality_steps:
                     encoded = _encode(candidate, target, has_alpha, quality)
-                    if encoded and len(encoded) <= max_bytes:
+                    if encoded and (
+                        max_bytes <= 0 or len(encoded) <= max_bytes
+                    ):
                         return encoded, target
                 candidate = candidate.resize(
                     (
@@ -120,6 +143,9 @@ def downscale_image_bytes(
 def _rescale_source(
     source_data: str,
     media_type: str,
+    *,
+    max_bytes: int,
+    max_side: int,
 ) -> tuple[str, str] | None:
     """Rescale one base64 payload.
 
@@ -137,13 +163,23 @@ def _rescale_source(
         raw = base64.b64decode(source_data, validate=True)
     except (ValueError, TypeError):
         return None
-    scaled, scaled_type = downscale_image_bytes(raw, media_type)
+    scaled, scaled_type = downscale_image_bytes(
+        raw,
+        media_type,
+        max_bytes=max_bytes,
+        max_side=max_side,
+    )
     if scaled == raw and scaled_type == media_type:
         return None
     return base64.b64encode(scaled).decode("ascii"), scaled_type
 
 
-def _rescale_block(block: Any) -> int:
+def _rescale_block(
+    block: Any,
+    *,
+    max_bytes: int,
+    max_side: int,
+) -> int:
     """Rescale one base64 image block in place. Returns 1 when changed."""
     if isinstance(block, dict):
         if block.get("type") not in ("data", "image"):
@@ -154,6 +190,8 @@ def _rescale_block(block: Any) -> int:
         replaced = _rescale_source(
             str(source.get("data") or ""),
             str(source.get("media_type") or ""),
+            max_bytes=max_bytes,
+            max_side=max_side,
         )
         if replaced is None:
             return 0
@@ -167,6 +205,8 @@ def _rescale_block(block: Any) -> int:
         replaced = _rescale_source(
             str(source.data or ""),
             str(source.media_type or ""),
+            max_bytes=max_bytes,
+            max_side=max_side,
         )
         if replaced is None:
             return 0
@@ -176,34 +216,69 @@ def _rescale_block(block: Any) -> int:
     return 0
 
 
-def _rescale_value(value: Any) -> int:
+def _rescale_value(
+    value: Any,
+    *,
+    max_bytes: int,
+    max_side: int,
+) -> int:
     """Recursively rescale base64 images in messages and tool results."""
-    changed = _rescale_block(value)
+    changed = _rescale_block(
+        value,
+        max_bytes=max_bytes,
+        max_side=max_side,
+    )
     if changed:
         return changed
 
     if isinstance(value, list):
-        return sum(_rescale_value(item) for item in value)
+        return sum(
+            _rescale_value(item, max_bytes=max_bytes, max_side=max_side)
+            for item in value
+        )
 
     if isinstance(value, dict):
         return sum(
-            _rescale_value(value.get(key)) for key in ("content", "output")
+            _rescale_value(
+                value.get(key),
+                max_bytes=max_bytes,
+                max_side=max_side,
+            )
+            for key in ("content", "output")
         )
 
     total = 0
     for attribute in ("content", "output"):
         nested = getattr(value, attribute, None)
         if isinstance(nested, list):
-            total += _rescale_value(nested)
+            total += _rescale_value(
+                nested,
+                max_bytes=max_bytes,
+                max_side=max_side,
+            )
     return total
 
 
-def downscale_oversized_images(msgs: Any) -> int:
-    """Rescale oversized images on a request copy. Returns the count changed."""
-    return _rescale_value(msgs)
+def downscale_oversized_images(
+    msgs: Any,
+    *,
+    max_bytes: int = MAX_INLINE_MEDIA_BYTES,
+    max_side: int = MAX_IMAGE_SIDE,
+) -> int:
+    """Rescale oversized images on a request copy. Returns the count changed.
+
+    The two limits are passed in rather than read from module constants so a
+    provisioned formatter and this pass cannot disagree about what fits.
+    """
+    return _rescale_value(msgs, max_bytes=max_bytes, max_side=max_side)
 
 
-async def downscale_oversized_images_async(msgs: Any) -> int:
+async def downscale_oversized_images_async(
+    msgs: Any,
+    *,
+    max_bytes: int = MAX_INLINE_MEDIA_BYTES,
+    max_side: int = MAX_IMAGE_SIDE,
+) -> int:
     """Rescale a request copy without blocking the event loop.
 
     Decoding, resizing and re-encoding a single 13 MB PNG takes about a
@@ -211,7 +286,12 @@ async def downscale_oversized_images_async(msgs: Any) -> int:
     same loop. The work therefore runs in a worker thread, after the caller
     has already dropped the media this request will not send.
     """
-    return await run_sync_io(downscale_oversized_images, msgs)
+    return await run_sync_io(
+        downscale_oversized_images,
+        msgs,
+        max_bytes=max_bytes,
+        max_side=max_side,
+    )
 
 
 __all__ = [

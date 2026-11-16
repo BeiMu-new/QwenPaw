@@ -794,6 +794,25 @@ class QwenPawAgent(Agent):
             and (count > 0)
         )
 
+    def _last_wire_media_summary(self) -> list[str]:
+        """Return labels for the media blocks the last formatting emitted.
+
+        A rejection only says the request was unacceptable. These labels let
+        the retry log name the images instead of saying "some media" while
+        every image in the request is dropped.
+        """
+        formatter = self._get_active_formatter()
+        if formatter is None:
+            return []
+        summary = getattr(
+            formatter,
+            "_qwenpaw_last_wire_media_summary",
+            None,
+        )
+        if not isinstance(summary, list):
+            return []
+        return [str(item) for item in summary]
+
     def _last_wire_request_had_audio(self) -> bool:
         """Return whether the last completed formatting emitted audio."""
         formatter = self._get_active_formatter()
@@ -1357,18 +1376,22 @@ class QwenPawAgent(Agent):
             elif media_payload_retry:
                 logger.warning(
                     "_reasoning failed because the provider rejected the "
-                    "media payload itself (%s); stripping media from the "
+                    "media payload itself (%s); stripping %s from the "
                     "retry request. Stored history remains unchanged, and "
                     "no capability loss is cached.",
                     e,
+                    ", ".join(self._last_wire_media_summary())
+                    or "unlabelled media",
                 )
                 self._set_formatter_media_strip(True)
             else:
                 logger.warning(
                     "_reasoning failed because the provider explicitly "
                     "rejected the model's media capability (%s); stripping "
-                    "media and retrying.",
+                    "%s and retrying.",
                     e,
+                    ", ".join(self._last_wire_media_summary())
+                    or "unlabelled media",
                 )
                 if self._uses_request_time_media_normalization():
                     self._set_formatter_media_strip(True)
